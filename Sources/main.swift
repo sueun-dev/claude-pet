@@ -14,11 +14,14 @@ claude-pet — Claude Code sessions in the menu bar
 """
 
 #if TESTING
-/// Test builds only: answer a prompt the way the menu bar app does. Release builds have no
-/// way to answer from the command line, so nothing an agent runs can approve its own request.
+/// Test builds only: answer a prompt the way the menu bar app does — as the session file
+/// shows it. Release builds have no way to answer from the command line.
 func testAnswer(_ args: ArraySlice<String>) {
-    guard args.count == 2, let answer = PermissionAnswer(rawValue: args.last!) else { fail("usage: claude-pet test-answer <prompt-id> <allowOnce|allowAlways|deny>") }
-    exit(sendAnswer(answer, to: args.first!) ? 0 : 1)
+    guard args.count == 2, let answer = PermissionAnswer(rawValue: args.last!) else {
+        fail("usage: claude-pet test-answer <prompt-id> <allowOnce|allowAlways|deny>")
+    }
+    guard let prompt = loadSessions().compactMap(\.prompt).first(where: { $0.id == args.first! }) else { fail("no such prompt") }
+    exit(sendAnswer(answer, to: prompt) ? 0 : 1)
 }
 #endif
 

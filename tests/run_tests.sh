@@ -138,20 +138,51 @@ hook '{"session_id":"p1","hook_event_name":"Stop","last_assistant_message":"ok"}
 finish_bg
 same "turn ended → waiting hook exits silently" "" "$(cat "$TMP/out5")"
 
-# --- only the menu bar app can answer -----------------------------------------
+# --- only the menu bar app can answer, and only what it showed -----------------
 hook_bg "$REQ" "$TMP/out6"
 id=$(wait_prompt p1)
 python3 - "$CLAUDE_PET_HOME/prompts/$id.sock" <<'PY'
 import socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(sys.argv[1]); s.sendall(b'{"answer":"allowAlways"}'); s.close()
+s.connect(sys.argv[1]); s.sendall(b'{"answer":"allowAlways","tool":"Bash","detail":"rm -rf dist","challenge":""}'); s.close()
 PY
-echo '{"answer":"allowAlways"}' > "$CLAUDE_PET_HOME/prompts/$id.json"   # what the old file channel read
+echo '{"answer":"allowAlways"}' > "$CLAUDE_PET_HOME/prompts/$id.json"   # what the 1.0.0 file channel read
 sleep 0.5
 same "an answer from another program is ignored" "yes" "$(still_waiting)"
+
+# Connect, pre-send an answer, then exec Claude Pet so the socket's peer *is* Claude Pet by
+# the time the (stopped, then resumed) hook checks it.
+hook_pid=$(jobs -rp | tail -1)
+python3 - "$hook_pid" "$CLAUDE_PET_HOME/prompts/$id.sock" "$BIN" <<'PY' &
+import os, signal, socket, sys, time
+hook, path, binary = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+os.kill(hook, signal.SIGSTOP)
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(path)
+s.sendall(b'{"answer":"allowAlways","tool":"Bash","detail":"rm -rf dist","challenge":""}')
+s.set_inheritable(True)
+r, w = os.pipe(); os.set_inheritable(r, True); os.set_inheritable(w, True); os.dup2(r, 0)
+if os.fork() == 0:
+    time.sleep(0.3); os.kill(hook, signal.SIGCONT); os._exit(0)
+os.execv(binary, [binary, "hook"])   # stays alive, blocked on a stdin that never ends
+PY
+attacker=$!
+sleep 2
+same "a process that turns into Claude Pet after connecting is ignored" "yes" "$(kill -0 "$hook_pid" 2>/dev/null && echo yes || echo no)"
+kill "$attacker" 2>/dev/null; wait "$attacker" 2>/dev/null
+
+session="$CLAUDE_PET_HOME/sessions/p1.json"
+cp "$session" "$TMP/real.json"
+python3 - "$session" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["prompt"]["detail"] = "ls"; json.dump(d, open(sys.argv[1], "w"))
+PY
+same "a click on a tampered request is refused" "1" "$("$BIN" test-answer "$id" allowOnce >/dev/null 2>&1; echo $?)"
+same "…and the hook keeps waiting" "yes" "$(kill -0 "$hook_pid" 2>/dev/null && echo yes || echo no)"
+cp "$TMP/real.json" "$session"
 "$BIN" test-answer "$id" deny
 finish_bg
-check "…and the real answer still gets through" '"behavior":"deny"' "$(cat "$TMP/out6")"
+check "…while the real answer still gets through" '"behavior":"deny"' "$(cat "$TMP/out6")"
 same "release builds cannot answer from the command line" "1" \
      "$(scripts/build.sh >/dev/null && build/ClaudePet.app/Contents/MacOS/claude-pet test-answer "$id" allowOnce >/dev/null 2>&1; echo $?)"
 
@@ -164,6 +195,9 @@ hook "$(request p4 Bash "{\"command\":\"$(printf 'x%.0s' {1..450})\"}")"
 same "very long command → not answerable" "False" "$(field p4 prompt answerable)"
 hook "$(request p5 mcp__github__create_issue '{"title":"x","body":"y"}')"
 same "tool whose input isn't shown → not answerable" "False" "$(field p5 prompt answerable)"
+hook "$(request p7 Edit '{"file_path":"/work/app.ts","old_string":"a","new_string":"b"}')"
+same "edit (diff not shown) → not answerable" "False" "$(field p7 prompt answerable)"
+check "…but the file is still shown" "/work/app.ts" "$(field p7 prompt detail)"
 "$BIN" sleep >/dev/null
 hook "$(request p6 Bash '{"command":"ls"}')"
 same "hidden menu bar item → not answerable (hook did not wait)" "False" "$(field p6 prompt answerable)"

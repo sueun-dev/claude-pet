@@ -80,8 +80,14 @@ struct PermissionPrompt: Codable, Equatable {
 
 enum PermissionAnswer: String, Codable { case allowOnce, allowAlways, deny }
 
-/// What the menu bar app sends to the waiting hook over the prompt's socket.
-struct PermissionReply: Codable { var answer: PermissionAnswer }
+/// What the menu bar app sends to the waiting hook over the prompt's socket: the answer,
+/// the request it was given for (as the panel showed it), and the hook's challenge.
+struct PermissionReply: Codable {
+    var answer: PermissionAnswer
+    var tool: String
+    var detail: String
+    var challenge: String
+}
 
 struct SessionRecord: Codable, Equatable {
     var id: String

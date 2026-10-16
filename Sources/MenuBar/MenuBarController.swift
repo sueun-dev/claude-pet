@@ -67,7 +67,10 @@ final class MenuBarController: NSObject {
         model.onOpen = { [weak self] in self?.open($0) }
         model.onClearFinished = { [weak self] in self?.clearFinished() }
         model.onAnswer = { prompt, answer in
-            DispatchQueue.global(qos: .userInitiated).async { sendAnswer(answer, to: prompt.id) }   // waits for the hook's ack
+            DispatchQueue.global(qos: .userInitiated).async {   // waits for the hook's challenge and ack
+                // Refused (the request changed, or its hook is gone): it must be answered in Claude.
+                if !sendAnswer(answer, to: prompt) { DispatchQueue.main.async { NSSound.beep() } }
+            }
         }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

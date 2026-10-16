@@ -29,5 +29,5 @@ os.replace(tmp, path)
 PY
 fi
 
-if [ "${1:-}" = "--purge" ]; then rm -rf "$DEST"; echo "Removed $DEST"; fi
+if [ "${1:-}" = "--purge" ]; then chmod -R u+w "$DEST" 2>/dev/null; rm -rf "$DEST"; echo "Removed $DEST"; fi
 echo "Claude Pet uninstalled."

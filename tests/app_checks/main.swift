@@ -5,8 +5,17 @@ import AppKit
 //   app_checks            full scenario
 //   app_checks launch     the app launched by a pending permission prompt
 
-var failures = 0
-func expect(_ ok: Bool, _ what: String) { print(ok ? "  ok   \(what)" : "  FAIL \(what)"); if !ok { failures += 1 } }
+var failures = 0, skipped = 0
+// A real click anywhere else closes the panel, as it should, so once you click during a run
+// the checks after it can't be judged: they are reported as skipped instead of failed.
+var outsideClicks = 0
+let clickWatcher = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { _ in outsideClicks += 1 }
+
+func expect(_ ok: Bool, _ what: String) {
+    if ok { print("  ok   \(what)") }
+    else if outsideClicks > 0 { print("  skip \(what) — you clicked elsewhere during the run"); skipped += 1 }
+    else { print("  FAIL \(what)"); failures += 1 }
+}
 
 let me = getpid()
 func write(_ id: String, _ state: SessionState, title: String, prompt: PermissionPrompt? = nil, age: Double = 0) {
@@ -24,6 +33,9 @@ func find<T: NSView>(_ type: T.Type, in view: NSView?) -> [T] {
 var panel: NSPanel? { NSApp.windows.compactMap { $0 as? NSPanel }.first }
 var statusButton: NSStatusBarButton? { NSApp.windows.flatMap { find(NSStatusBarButton.self, in: $0.contentView) }.first }
 var itemFrame: NSRect { statusButton.flatMap { b in b.window?.convertToScreen(b.convert(b.bounds, to: nil)) } ?? .zero }
+
+/// Where the panel and the item are, for failure messages.
+var placement: String { "panel \(panel?.isVisible == true ? "\(panel!.frame)" : "hidden"), item \(itemFrame)" }
 
 func panelIsUnderItem() -> Bool {
     guard let p = panel, p.isVisible else { return false }
@@ -61,7 +73,7 @@ Paths.ensure()
 if CommandLine.arguments.dropFirst().first == "launch" {
     write("b", .needsInput, title: "Deploy", prompt: prompt)      // the prompt whose hook launched us
     step(1.5, "launched by a permission prompt") {
-        expect(panelIsUnderItem(), "the panel drops down on screen, right under the menu bar item (panel \(panel?.frame ?? .zero), item \(itemFrame))")
+        expect(panelIsUnderItem(), "the panel drops down on screen, right under the menu bar item (\(placement))")
         expect(promptButtons().count == 3, "the prompt shows Deny, Always Allow and Allow Once")
     }
 } else {
@@ -73,7 +85,7 @@ if CommandLine.arguments.dropFirst().first == "launch" {
     }
     step(0.2, "permission prompt arrives") { write("b", .needsInput, title: "Deploy", prompt: prompt) }
     step(0.8, "") {
-        expect(panelIsUnderItem(), "a permission prompt drops the panel down under the item")
+        expect(panelIsUnderItem(), "a permission prompt drops the panel down under the item (\(placement))")
         expect(promptButtons().count == 3, "the prompt shows Deny, Always Allow and Allow Once")
     }
     step(4.5, "") { expect(panel?.isVisible == true, "the prompt panel stays open past the 4 s alert time") }
@@ -82,7 +94,7 @@ if CommandLine.arguments.dropFirst().first == "launch" {
         if let b = promptButtons().last { click(b) }
     }
     step(0.1, "") {
-        expect(listener?.nextAnswer(waitingAtMost: 2) == .allowOnce, "Allow Once reaches the waiting hook")
+        expect(listener?.nextAnswer(to: prompt, waitingAtMost: 2) == .allowOnce, "Allow Once reaches the waiting hook")
         expect(panel?.isVisible == true, "the button did not also trigger its row (panel still open)")
         listener = nil
     }
@@ -93,17 +105,17 @@ if CommandLine.arguments.dropFirst().first == "launch" {
         write("d", .needsInput, title: "Long command", prompt: p)
     }
     step(0.8, "") {
-        expect(panelIsUnderItem(), "it still drops the panel down")
+        expect(panelIsUnderItem(), "it still drops the panel down (\(placement))")
         expect(promptButtons().isEmpty, "but offers no buttons: it must be answered in Claude")
     }
     step(0.1, "") { write("d", .running, title: "Long command") }
     step(0.8, "") { expect(panel?.isVisible != true, "the panel closes once that prompt is gone") }
     step(0.2, "a running session finishes") { write("c", .running, title: "Tests") }
     step(0.5, "") { write("c", .ready, title: "Tests") }
-    step(0.8, "") { expect(panelIsUnderItem(), "a session finishing after launch drops the panel under the item") }
+    step(0.8, "") { expect(panelIsUnderItem(), "a session finishing after launch drops the panel under the item (\(placement))") }
     step(4.6, "") { expect(panel?.isVisible != true, "the finish alert closes by itself after 4 s") }
     step(0.2, "click the menu bar item") { statusButton?.performClick(nil) }
-    step(0.6, "") { expect(panelIsUnderItem(), "clicking the item opens the panel under it") }
+    step(0.6, "") { expect(panelIsUnderItem(), "clicking the item opens the panel under it (\(placement))") }
     step(5.0, "") { expect(panel?.isVisible == true, "a clicked-open panel stays open") }
     step(0.1, "click the first row (Tests, the newest finished)") {
         if let host = panel?.contentView { click(host, at: NSPoint(x: 150, y: host.isFlipped ? 52 : host.bounds.height - 52)) }
@@ -119,7 +131,11 @@ if CommandLine.arguments.dropFirst().first == "launch" {
 }
 
 func run(_ i: Int) {
-    guard i < steps.count else { print(failures == 0 ? "ALL APP CHECKS PASSED" : "\(failures) APP CHECK(S) FAILED"); exit(failures == 0 ? 0 : 1) }
+    guard i < steps.count else {
+        let note = skipped > 0 ? " (\(skipped) skipped: run again without clicking)" : ""
+        print((failures == 0 ? "ALL APP CHECKS PASSED" : "\(failures) APP CHECK(S) FAILED") + note)
+        exit(failures == 0 ? 0 : 1)
+    }
     let (after, name, body) = steps[i]
     DispatchQueue.main.asyncAfter(deadline: .now() + after) {
         if !name.isEmpty { print("• \(name)") }

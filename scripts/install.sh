@@ -14,9 +14,12 @@ rm -rf "$DEST/answers"            # answer files were replaced by sockets after 
 # Stop the running app so the new binary takes over.
 pkill -f "$DEST/ClaudePet.app/Contents/MacOS/claude-pet" 2>/dev/null || true
 
+chmod -R u+w "$DEST/bin" "$DEST/ClaudePet.app" 2>/dev/null || true   # read-only since the last install
 rm -rf "$DEST/ClaudePet.app"
 cp -R build/ClaudePet.app "$DEST/ClaudePet.app"
 ln -sf "$DEST/ClaudePet.app/Contents/MacOS/claude-pet" "$DEST/bin/claude-pet"
+# Read-only: an agent that can write files must not be able to swap in a hook that approves everything.
+chmod -R a-w "$DEST/ClaudePet.app" "$DEST/bin"
 cp commands/pet.md "$HOME/.claude/commands/"
 
 SETTINGS="$HOME/.claude/settings.json"

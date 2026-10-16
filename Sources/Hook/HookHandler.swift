@@ -17,9 +17,10 @@ private let answerPoll: Double = 0.15
 /// so it is shown as "needs input" but never turned into a prompt.
 private let questionTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
 
-/// Tools whose whole request fits in `permissionDetail` (a command, path or URL), so the
-/// panel can show everything that is being approved. Others must be answered in Claude.
-private let reviewableTools: Set<String> = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Read", "WebFetch"]
+/// Tools whose whole request fits in `permissionDetail` — a command, a file to read, a URL —
+/// so the panel shows everything being approved. Edits (whose diff the panel can't show),
+/// MCP tools and the rest must be answered in Claude.
+private let reviewableTools: Set<String> = ["Bash", "Read", "WebFetch"]
 
 func runHook() {
     let input = FileHandle.standardInput.readDataToEndOfFile()
@@ -154,7 +155,7 @@ private func apply(_ name: String, _ ev: [String: Any], to rec: inout SessionRec
 private func waitForAnswer(to prompt: PermissionPrompt, on listener: AnswerListener, session url: URL, suggestions: Any?) {
     let deadline = Date().addingTimeInterval(answerTimeout)
     while Date() < deadline {
-        if let answer = listener.nextAnswer(waitingAtMost: answerPoll) {
+        if let answer = listener.nextAnswer(to: prompt, waitingAtMost: answerPoll) {
             closePrompt(prompt.id, in: url, message: answer == .deny ? "Denied from the menu bar" : "Working…")
             printDecision(answer, suggestions: suggestions)
             return

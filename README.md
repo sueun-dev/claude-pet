@@ -18,8 +18,8 @@ Codex Pets, done as a native menu bar item with a Liquid Glass panel.
 - **Permission prompts** — when Claude asks to run something, the panel drops down with the
   command and **Deny · Always Allow · Allow Once**, and stays until you answer or click
   elsewhere. Claude shows its own dialog at the same time and takes whichever answer comes
-  first, so either place works. Requests the panel can't show in full (see [Security](#security)),
-  questions and plan reviews are shown but must be answered in Claude.
+  first, so either place works. Edits, requests the panel can't show in full (see
+  [Security](#security)), questions and plan reviews are shown but must be answered in Claude.
 - **`/pet`** — toggles the item; `/pet on`, `/pet off`, `/pet status`.
 
 ## Requirements
@@ -49,18 +49,27 @@ Everything stays on your Mac: no network access, no analytics.
 
 ## Security
 
-Answering permission prompts outside Claude must not become a way around them:
+Answering permission prompts outside Claude must not become a way around them.
 
-- **Only Claude Pet can answer.** The panel's answer reaches the waiting hook over a Unix socket,
-  never a file, and the hook accepts it only from a process running the Claude Pet executable
-  itself — signed with the hardened runtime, so nothing can be injected into it. An agent that
-  can write files, or run `curl`, `nc` or `python`, cannot approve its own request, and the
-  release build has no command-line way to answer.
-- **Only what you can see.** Buttons appear only when the panel can show the whole request: the
-  full command, path or URL, at most 400 characters and 6 lines, with no control or invisible
-  formatting characters and no long runs of spaces that could push part of a command out of view.
-  Tools whose input it can't show (MCP tools, for example) must be answered in Claude.
-- **Private state.** `~/.claude-pet` is readable only by you (700/600).
+- **Only Claude Pet can answer.** The panel's answer reaches the waiting hook over a Unix
+  socket, never a file. The hook accepts it only from a process running the Claude Pet
+  executable — signed with the hardened runtime, so nothing can be injected into it — and only
+  if that process then echoes a one-time challenge, which a process that connects and only
+  afterwards turns into Claude Pet (`exec`) cannot do. The release build has no command-line
+  way to answer.
+- **Only what you saw.** Buttons appear only when the panel can show the whole request: a shell
+  command, a file to read or a URL, at most 400 characters and 6 lines, with no control or
+  invisible formatting characters and no long runs of spaces. Each answer names the exact
+  request it was given for, and the hook refuses it if that differs from what Claude asked —
+  so editing the session file the panel reads can't redirect your click. Edits (whose diff the
+  panel can't show), MCP tools and everything else must be answered in Claude.
+- **Read-only install, private state.** The installed app and hook binary are read-only, so an
+  agent that can write files can't swap in a hook that approves everything; `~/.claude-pet`
+  is readable only by you (700/600).
+
+What no local helper can do is stop code that already runs as you without asking: an agent
+allowed to run arbitrary programs could change Claude Code's own settings. Claude Pet doesn't
+widen that; keep such permissions narrow.
 
 ## How it works
 
