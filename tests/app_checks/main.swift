@@ -52,7 +52,8 @@ func click(_ view: NSView, at point: NSPoint? = nil) {
 }
 
 let prompt = PermissionPrompt(id: "PROMPT-1", tool: "Bash", detail: "rm -rf dist", inputKey: "k", canAlwaysAllow: true,
-                              created: Date().timeIntervalSince1970)
+                              answerable: true, created: Date().timeIntervalSince1970)
+var listener: AnswerListener?   // stands in for the hook waiting on PROMPT-1
 var steps: [(Double, String, () -> Void)] = []
 func step(_ after: Double, _ name: String, _ body: @escaping () -> Void) { steps.append((after, name, body)) }
 
@@ -76,13 +77,27 @@ if CommandLine.arguments.dropFirst().first == "launch" {
         expect(promptButtons().count == 3, "the prompt shows Deny, Always Allow and Allow Once")
     }
     step(4.5, "") { expect(panel?.isVisible == true, "the prompt panel stays open past the 4 s alert time") }
-    step(0.1, "click Allow Once") { if let b = promptButtons().last { click(b) } }
-    step(0.5, "") {
-        expect(readJSON(PermissionReply.self, Paths.answer("PROMPT-1"))?.answer == .allowOnce, "Allow Once wrote the answer for the hook")
+    step(0.1, "click Allow Once") {
+        listener = AnswerListener(promptID: prompt.id)
+        if let b = promptButtons().last { click(b) }
+    }
+    step(0.1, "") {
+        expect(listener?.nextAnswer(waitingAtMost: 2) == .allowOnce, "Allow Once reaches the waiting hook")
         expect(panel?.isVisible == true, "the button did not also trigger its row (panel still open)")
+        listener = nil
     }
     step(0.1, "hook closes the prompt") { write("b", .running, title: "Deploy") }
     step(0.8, "") { expect(panel?.isVisible != true, "the panel closes once the prompt is answered") }
+    step(0.1, "a prompt the panel can't show in full") {
+        var p = prompt; p.id = "PROMPT-2"; p.answerable = false
+        write("d", .needsInput, title: "Long command", prompt: p)
+    }
+    step(0.8, "") {
+        expect(panelIsUnderItem(), "it still drops the panel down")
+        expect(promptButtons().isEmpty, "but offers no buttons: it must be answered in Claude")
+    }
+    step(0.1, "") { write("d", .running, title: "Long command") }
+    step(0.8, "") { expect(panel?.isVisible != true, "the panel closes once that prompt is gone") }
     step(0.2, "a running session finishes") { write("c", .running, title: "Tests") }
     step(0.5, "") { write("c", .ready, title: "Tests") }
     step(0.8, "") { expect(panelIsUnderItem(), "a session finishing after launch drops the panel under the item") }

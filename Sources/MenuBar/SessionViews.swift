@@ -132,6 +132,7 @@ private struct SessionRow: View {
 }
 
 /// The command being asked about, and the same three choices Claude's own dialog offers.
+/// A request the panel can't show in full gets no buttons: it has to be answered in Claude.
 private struct PromptControls: View {
     let prompt: PermissionPrompt
     let answer: (PermissionAnswer) -> Void
@@ -141,24 +142,32 @@ private struct PromptControls: View {
             if !prompt.detail.isEmpty {
                 Text(prompt.detail)
                     .font(.system(size: 11, design: .monospaced))
-                    .lineLimit(4)
+                    .lineLimit(prompt.answerable ? nil : 3)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 8).padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
             }
-            HStack(spacing: 6) {
-                Button("Deny") { answer(.deny) }
-                    .buttonStyle(.glass)
-                Spacer(minLength: 0)
-                if prompt.canAlwaysAllow {
-                    Button("Always Allow") { answer(.allowAlways) }
-                        .buttonStyle(.glass)
-                }
-                Button("Allow Once") { answer(.allowOnce) }
-                    .buttonStyle(.glassProminent)
+            if prompt.answerable { buttons } else {
+                Text("Review this request in Claude")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            .controlSize(.small)
         }
+    }
+
+    private var buttons: some View {
+        HStack(spacing: 6) {
+            Button("Deny") { answer(.deny) }
+                .buttonStyle(.glass)
+            Spacer(minLength: 0)
+            if prompt.canAlwaysAllow {
+                Button("Always Allow") { answer(.allowAlways) }
+                    .buttonStyle(.glass)
+            }
+            Button("Allow Once") { answer(.allowOnce) }
+                .buttonStyle(.glassProminent)
+        }
+        .controlSize(.small)
     }
 }
 

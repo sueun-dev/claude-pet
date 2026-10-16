@@ -13,6 +13,15 @@ claude-pet — Claude Code sessions in the menu bar
   claude-pet hook            Claude Code hook entry point (event JSON on stdin)
 """
 
+#if TESTING
+/// Test builds only: answer a prompt the way the menu bar app does. Release builds have no
+/// way to answer from the command line, so nothing an agent runs can approve its own request.
+func testAnswer(_ args: ArraySlice<String>) {
+    guard args.count == 2, let answer = PermissionAnswer(rawValue: args.last!) else { fail("usage: claude-pet test-answer <prompt-id> <allowOnce|allowAlways|deny>") }
+    exit(sendAnswer(answer, to: args.first!) ? 0 : 1)
+}
+#endif
+
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
@@ -52,6 +61,7 @@ func petCommand(_ word: String?) {
     run()
 }
 
+umask(0o077)   // sessions hold commands and messages: keep everything owner-only
 Paths.ensure()
 let argv = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") }   // LaunchServices noise
 
@@ -59,6 +69,9 @@ switch argv.first {
 case nil, "app": runApp()
 case "hook": runHook()
 case "cmd": petCommand(argv.dropFirst().first)
+#if TESTING
+case "test-answer": testAnswer(argv.dropFirst())
+#endif
 case let name? where commands[name] != nil: commands[name]!()
 default: fail(usage)
 }

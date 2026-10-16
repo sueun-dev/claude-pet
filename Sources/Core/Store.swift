@@ -8,7 +8,7 @@ enum Paths {
         ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude-pet")
     static let sessions = root.appendingPathComponent("sessions")
     static let config = root.appendingPathComponent("config.json")
-    static let answers = root.appendingPathComponent("answers")
+    static let prompts = root.appendingPathComponent("prompts")
     static let lock = root.appendingPathComponent("app.lock")
 
     static func session(_ id: String) -> URL {
@@ -16,10 +16,14 @@ enum Paths {
         return sessions.appendingPathComponent(safe + ".json")
     }
 
-    static func answer(_ promptID: String) -> URL { answers.appendingPathComponent(promptID + ".json") }
+    /// Where the hook waiting on a permission prompt listens for the menu bar's answer.
+    static func promptSocket(_ promptID: String) -> URL { prompts.appendingPathComponent(promptID + ".sock") }
 
+    /// Owner-only: sessions hold commands and messages. (main.swift also sets umask 077.)
     static func ensure() {
-        for d in [root, sessions, answers] { try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
+        for d in [root, sessions, prompts] {
+            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        }
     }
 }
 
@@ -49,21 +53,34 @@ enum SessionState: String, Codable {
     }
 }
 
-/// A permission dialog Claude is showing right now, answerable from the menu bar.
+/// A permission dialog Claude is showing right now.
 struct PermissionPrompt: Codable, Equatable {
     var id: String
     var tool: String
     var detail: String        // the command, file or URL being asked about
     var inputKey: String      // fingerprint of the tool input, to spot this call's PostToolUse
     var canAlwaysAllow: Bool  // Claude offered "don't ask again" rules
+    var answerable: Bool      // a hook is listening for the menu bar's answer
     var created: Double
 
     var question: String { "Allow \(tool)?" }
+
+    /// The panel only offers to answer when it can show the whole request plainly: short,
+    /// a few lines, and free of control or invisible formatting characters and of long
+    /// whitespace runs that could push part of a command out of view.
+    static func isReviewable(_ text: String) -> Bool {
+        guard !text.isEmpty, text.count <= 400,
+              text.split(separator: "\n", omittingEmptySubsequences: false).count <= 6,
+              text.range(of: "[ \t]{4,}", options: .regularExpression) == nil else { return false }
+        return !text.unicodeScalars.contains {
+            ($0.properties.generalCategory == .control && $0 != "\n") || $0.properties.generalCategory == .format
+        }
+    }
 }
 
 enum PermissionAnswer: String, Codable { case allowOnce, allowAlways, deny }
 
-/// Written by the menu bar app to answers/<prompt id>.json; read by the waiting hook.
+/// What the menu bar app sends to the waiting hook over the prompt's socket.
 struct PermissionReply: Codable { var answer: PermissionAnswer }
 
 struct SessionRecord: Codable, Equatable {
@@ -131,8 +148,9 @@ func appIsRunning() -> Bool {
     return false
 }
 
-/// Start the menu bar app without stealing focus.
+/// Start the menu bar app without stealing focus. (Test builds never launch it.)
 func launchApp() {
+    #if !TESTING
     let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
     let bundle = exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let task = Process()
@@ -146,6 +164,7 @@ func launchApp() {
     task.standardOutput = FileHandle.nullDevice
     task.standardError = FileHandle.nullDevice
     try? task.run()
+    #endif
 }
 
 func processAlive(_ pid: Int32) -> Bool { kill(pid, 0) == 0 || errno == EPERM }

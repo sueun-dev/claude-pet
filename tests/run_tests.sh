@@ -1,14 +1,18 @@
 #!/bin/bash
-# End-to-end checks for the CLI and the hook state machine. Runs against a throwaway
-# CLAUDE_PET_HOME, so your real sessions and menu bar app are never touched.
-#   scripts/build.sh && tests/run_tests.sh
+# End-to-end checks for the CLI and the hook state machine, including how permission
+# answers are accepted. Builds a test binary (with a `test-answer` command the release
+# build doesn't have) and runs it against a throwaway CLAUDE_PET_HOME, so your real
+# sessions and menu bar app are never touched.
+#   tests/run_tests.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-BIN="$PWD/build/ClaudePet.app/Contents/MacOS/claude-pet"
-[ -x "$BIN" ] || { echo "build first: scripts/build.sh"; exit 1; }
-export CLAUDE_PET_HOME="$(mktemp -d)"
-trap 'rm -rf "$CLAUDE_PET_HOME"' EXIT
+TMP="$(mktemp -d /tmp/claude-pet-tests.XXXXXX)"   # short: socket paths are limited to 104 bytes
+trap 'rm -rf "$TMP"' EXIT
+BIN="$TMP/claude-pet"
+swiftc -Onone -swift-version 5 -target "$(uname -m)-apple-macos26" -D TESTING \
+  -framework AppKit -framework SwiftUI $(find Sources -name "*.swift") -o "$BIN" || exit 1
+export CLAUDE_PET_HOME="$TMP/home"
 
 pass=0 fail=0
 ok()    { pass=$((pass + 1)); }
@@ -17,7 +21,7 @@ check() { [[ "$3" == *"$2"* ]] && ok || bad "$1" "…$2…" "$3"; }   # actual c
 same()  { [[ "$3" == "$2" ]] && ok || bad "$1" "$2" "$3"; }        # actual equals expected
 
 hook() {   # feed one event; the hook must exit 0 within 5 s and print nothing
-  local out="$CLAUDE_PET_HOME/hook.out" pid rc
+  local out="$TMP/hook.out" pid rc
   CLAUDE_PID=$$ "$BIN" hook <<<"$1" >"$out" 2>&1 &
   pid=$!
   for _ in $(seq 250); do kill -0 "$pid" 2>/dev/null || break; sleep 0.02; done
@@ -34,6 +38,7 @@ finish_bg() {   # wait up to 5 s for background hooks; one that is still waiting
   kill $(jobs -rp) 2>/dev/null; wait
   bad "background hook finishes" "exit within 5 s" "still waiting"
 }
+still_waiting() { [ -n "$(jobs -rp)" ] && echo yes || echo no; }
 state() { "$BIN" status | grep -F "$1" | head -1; }
 field() {   # field <session> <key> [<subkey>] — a value from the session's JSON, or ""
   python3 - "$CLAUDE_PET_HOME/sessions/$1.json" "${@:2}" <<'PY'
@@ -46,8 +51,9 @@ PY
 }
 prompt_id() { field "$1" prompt id; }
 wait_prompt() { for _ in $(seq 50); do id=$(prompt_id "$1"); [ -n "$id" ] && { echo "$id"; return; }; sleep 0.1; done; }
-
-"$BIN" sleep >/dev/null   # keep the app from launching during tests
+request() {   # request <session> <tool> <tool_input JSON> — a PermissionRequest event
+  echo "{\"session_id\":\"$1\",\"cwd\":\"/work/$1\",\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"$2\",\"tool_input\":$3,\"permission_suggestions\":[{\"type\":\"addRules\",\"rules\":[{\"toolName\":\"Bash\",\"ruleContent\":\"rm:*\"}],\"behavior\":\"allow\",\"destination\":\"localSettings\"}]}"
+}
 
 # --- session lifecycle -------------------------------------------------------
 S='"session_id":"s1","cwd":"/work/web-app"'
@@ -70,7 +76,7 @@ same "elapsed time keeps counting from the prompt" "$started" "$(field s1 runSta
 hook "{$S,\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"AskUserQuestion\",\"tool_input\":{\"questions\":[{\"question\":\"Which provider?\"}]}}"
 hook "{$S,\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"AskUserQuestion\",\"tool_input\":{\"questions\":[{\"question\":\"Which provider?\"}]}}"
 check "question → needs input, question text kept" "[Needs input] Fix the login bug: Which provider?" "$(state 'Fix the login')"
-same "questions get no answer buttons" "" "$(prompt_id s1)"
+same "questions are not turned into prompts" "" "$(prompt_id s1)"
 
 hook "{$S,\"hook_event_name\":\"PermissionDenied\",\"tool_name\":\"Bash\",\"tool_input\":{}}"
 check "denied → back to work" "[Running] Fix the login bug: Permission denied" "$(state 'Fix the login')"
@@ -91,48 +97,83 @@ hook 'not json'
 hook '{}'
 
 # --- permission prompts answered from the menu bar ----------------------------
-P='"session_id":"p1","cwd":"/work/infra"'
-REQ="{$P,\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf dist\"},\"permission_suggestions\":[{\"type\":\"addRules\",\"rules\":[{\"toolName\":\"Bash\",\"ruleContent\":\"rm:*\"}],\"behavior\":\"allow\",\"destination\":\"localSettings\"}]}"
+REQ=$(request p1 Bash '{"command":"rm -rf dist"}')
 
-hook_bg "$REQ" "$CLAUDE_PET_HOME/out1"
+hook_bg "$REQ" "$TMP/out1"
 id=$(wait_prompt p1)
-check "prompt is recorded" "[Needs input] infra: Allow Bash?" "$(state 'infra')"
-same "prompt shows the command" "rm -rf dist" "$(field p1 prompt detail)"
+check "prompt is recorded" "[Needs input] p1: Allow Bash?" "$(state 'p1')"
+same "prompt shows the whole command" "rm -rf dist" "$(field p1 prompt detail)"
+same "prompt is answerable from the menu bar" "True" "$(field p1 prompt answerable)"
 same "prompt offers always-allow" "True" "$(field p1 prompt canAlwaysAllow)"
-echo '{"answer":"allowAlways"}' > "$CLAUDE_PET_HOME/answers/$id.json"
+"$BIN" test-answer "$id" allowAlways
 finish_bg
-check "always allow → allow" '"behavior":"allow"' "$(cat "$CLAUDE_PET_HOME/out1")"
-check "always allow passes the rules" '"ruleContent":"rm:*"' "$(cat "$CLAUDE_PET_HOME/out1")"
-check "answered → prompt closed" "[Running] infra" "$(state 'infra')"
-same "answer file consumed" "" "$(ls "$CLAUDE_PET_HOME/answers")"
+check "always allow → allow" '"behavior":"allow"' "$(cat "$TMP/out1")"
+check "always allow passes the rules" '"ruleContent":"rm:*"' "$(cat "$TMP/out1")"
+check "answered → prompt closed" "[Running] p1" "$(state 'p1')"
+same "the socket is removed" "" "$(ls "$CLAUDE_PET_HOME/prompts")"
 
-hook_bg "$REQ" "$CLAUDE_PET_HOME/out2"
+hook_bg "$REQ" "$TMP/out2"
 id=$(wait_prompt p1)
-echo '{"answer":"allowOnce"}' > "$CLAUDE_PET_HOME/answers/$id.json"
+"$BIN" test-answer "$id" allowOnce
 finish_bg
 same "allow once → plain allow" '{"hookSpecificOutput":{"decision":{"behavior":"allow"},"hookEventName":"PermissionRequest"}}' \
-     "$(python3 -c "import json,sys;print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True,separators=(',',':')))" "$CLAUDE_PET_HOME/out2")"
+     "$(python3 -c "import json,sys;print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True,separators=(',',':')))" "$TMP/out2")"
 
-hook_bg "$REQ" "$CLAUDE_PET_HOME/out3"
+hook_bg "$REQ" "$TMP/out3"
 id=$(wait_prompt p1)
-echo '{"answer":"deny"}' > "$CLAUDE_PET_HOME/answers/$id.json"
+"$BIN" test-answer "$id" deny
 finish_bg
-check "deny → deny decision" '"behavior":"deny"' "$(cat "$CLAUDE_PET_HOME/out3")"
+check "deny → deny decision" '"behavior":"deny"' "$(cat "$TMP/out3")"
 
-hook_bg "$REQ" "$CLAUDE_PET_HOME/out4"
+hook_bg "$REQ" "$TMP/out4"
 wait_prompt p1 >/dev/null
-hook "{$P,\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf dist\"}}"
+hook '{"session_id":"p1","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf dist"}}'
 finish_bg
-same "answered in Claude → hook exits silently" "" "$(cat "$CLAUDE_PET_HOME/out4")"
-check "answered in Claude → prompt cleared" "[Running] infra" "$(state 'infra')"
+same "answered in Claude → hook exits silently" "" "$(cat "$TMP/out4")"
+check "answered in Claude → prompt cleared" "[Running] p1" "$(state 'p1')"
 
-hook_bg "$REQ" "$CLAUDE_PET_HOME/out5"
+hook_bg "$REQ" "$TMP/out5"
 wait_prompt p1 >/dev/null
-hook "{$P,\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"ok\"}"
+hook '{"session_id":"p1","hook_event_name":"Stop","last_assistant_message":"ok"}'
 finish_bg
-same "turn ended → waiting hook exits silently" "" "$(cat "$CLAUDE_PET_HOME/out5")"
+same "turn ended → waiting hook exits silently" "" "$(cat "$TMP/out5")"
+
+# --- only the menu bar app can answer -----------------------------------------
+hook_bg "$REQ" "$TMP/out6"
+id=$(wait_prompt p1)
+python3 - "$CLAUDE_PET_HOME/prompts/$id.sock" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1]); s.sendall(b'{"answer":"allowAlways"}'); s.close()
+PY
+echo '{"answer":"allowAlways"}' > "$CLAUDE_PET_HOME/prompts/$id.json"   # what the old file channel read
+sleep 0.5
+same "an answer from another program is ignored" "yes" "$(still_waiting)"
+"$BIN" test-answer "$id" deny
+finish_bg
+check "…and the real answer still gets through" '"behavior":"deny"' "$(cat "$TMP/out6")"
+same "release builds cannot answer from the command line" "1" \
+     "$(scripts/build.sh >/dev/null && build/ClaudePet.app/Contents/MacOS/claude-pet test-answer "$id" allowOnce >/dev/null 2>&1; echo $?)"
+
+# --- requests the panel can't show in full go to Claude ----------------------
+hook "$(request p2 Bash '{"command":"echo hi                                         ; rm -rf ~"}')"
+same "padded command → not answerable (hook did not wait)" "False" "$(field p2 prompt answerable)"
+hook "$(request p3 Bash '{"command":"echo safe‮;rm -rf ~"}')"
+same "invisible formatting character → not answerable" "False" "$(field p3 prompt answerable)"
+hook "$(request p4 Bash "{\"command\":\"$(printf 'x%.0s' {1..450})\"}")"
+same "very long command → not answerable" "False" "$(field p4 prompt answerable)"
+hook "$(request p5 mcp__github__create_issue '{"title":"x","body":"y"}')"
+same "tool whose input isn't shown → not answerable" "False" "$(field p5 prompt answerable)"
+"$BIN" sleep >/dev/null
+hook "$(request p6 Bash '{"command":"ls"}')"
+same "hidden menu bar item → not answerable (hook did not wait)" "False" "$(field p6 prompt answerable)"
+
+# --- files stay private ---------------------------------------------------------
+same "state folder is owner-only" "700" "$(stat -f %Lp "$CLAUDE_PET_HOME")"
+same "session files are owner-only" "600" "$(stat -f %Lp "$CLAUDE_PET_HOME/sessions/s1.json")"
 
 # --- CLI -----------------------------------------------------------------------
+check "/pet on shows" "is on" "$("$BIN" cmd on)"
 check "/pet off hides" "hidden" "$("$BIN" cmd off)"
 check "status reflects hidden" "awake: false" "$("$BIN" status)"
 check "/pet status lists sessions" "Fix the login bug" "$("$BIN" cmd status)"

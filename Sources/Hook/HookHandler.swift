@@ -4,17 +4,22 @@ import Foundation
 // `claude-pet hook` — registered for every Claude Code hook event. Reads the event JSON
 // on stdin and folds it into ~/.claude-pet/sessions/<session>.json.
 //
-// For PermissionRequest it also waits for an answer from the menu bar. Claude shows its
-// own dialog at the same time and takes whichever answer comes first, so if the user
-// answers in Claude instead, the hook notices and exits without printing anything.
-// Apart from that one decision, the hook must stay silent: stdout is read as hook output.
+// For PermissionRequest it can also wait for an answer from the menu bar, delivered over a
+// socket (see AnswerChannel.swift). Claude shows its own dialog at the same time and takes
+// whichever answer comes first, so if the user answers in Claude instead, the hook notices
+// and exits without printing anything. Apart from that one decision, the hook must stay
+// silent: stdout is read as hook output.
 
 private let answerTimeout: Double = 570   // just under the 600 s hook timeout install.sh sets
 private let answerPoll: Double = 0.15
 
-/// Tools whose "permission" is really a question or plan review: answering them blindly
-/// from the menu bar would skip what Claude is asking, so they are only shown, not answered.
-private let unanswerableTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
+/// A question or plan review: answering it blindly would skip what Claude is asking,
+/// so it is shown as "needs input" but never turned into a prompt.
+private let questionTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
+
+/// Tools whose whole request fits in `permissionDetail` (a command, path or URL), so the
+/// panel can show everything that is being approved. Others must be answered in Claude.
+private let reviewableTools: Set<String> = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Read", "WebFetch"]
 
 func runHook() {
     let input = FileHandle.standardInput.readDataToEndOfFile()
@@ -43,12 +48,19 @@ func runHook() {
     apply(name, ev, to: &rec, now: now)
     rec.updated = now
     if rec.state == .running && rec.runStart == nil { rec.runStart = now }   // hooks installed mid-turn
+
+    // Listen before publishing the prompt, so the app can never answer into the void.
+    var listener: AnswerListener?
+    if name == "PermissionRequest", let prompt = rec.prompt, prompt.answerable {
+        listener = AnswerListener(promptID: prompt.id)
+        if listener == nil { rec.prompt?.answerable = false }
+    }
     writeJSON(rec, url)
 
     if loadConfig().awake && !appIsRunning() { launchApp() }
 
-    if name == "PermissionRequest", let prompt = rec.prompt {
-        waitForAnswer(to: prompt, session: url, suggestions: ev["permission_suggestions"])
+    if let listener, let prompt = rec.prompt {
+        waitForAnswer(to: prompt, on: listener, session: url, suggestions: ev["permission_suggestions"])
     }
 }
 
@@ -88,13 +100,16 @@ private func apply(_ name: String, _ ev: [String: Any], to rec: inout SessionRec
         // Answering a permission prompt or question lands here: back to work.
         if rec.state == .needsInput || rec.state == .idle { rec.state = .running; rec.message = "Working…" }
 
-    case "PermissionRequest" where unanswerableTools.contains(tool):
+    case "PermissionRequest" where questionTools.contains(tool):
         rec.state = .needsInput   // keep the question or plan text PreToolUse already showed
 
     case "PermissionRequest":
-        rec.prompt = PermissionPrompt(id: UUID().uuidString, tool: tool, detail: permissionDetail(tool, input),
-                                      inputKey: fingerprint(tool, input),
+        let detail = permissionDetail(tool, input)
+        rec.prompt = PermissionPrompt(id: String(format: "%016llx", UInt64.random(in: .min ... .max)), tool: tool,
+                                      detail: clip(detail, 2000), inputKey: fingerprint(tool, input),
                                       canAlwaysAllow: !((ev["permission_suggestions"] as? [Any]) ?? []).isEmpty,
+                                      answerable: reviewableTools.contains(tool) && PermissionPrompt.isReviewable(detail)
+                                                  && loadConfig().awake,
                                       created: now)
 
     case "PermissionDenied":
@@ -136,18 +151,15 @@ private func apply(_ name: String, _ ev: [String: Any], to rec: inout SessionRec
 
 /// Blocks until the menu bar answers, the prompt goes away (answered in Claude, or
 /// replaced by a newer one), or the timeout passes. Prints a decision only for a menu bar answer.
-private func waitForAnswer(to prompt: PermissionPrompt, session url: URL, suggestions: Any?) {
-    let answerURL = Paths.answer(prompt.id)
+private func waitForAnswer(to prompt: PermissionPrompt, on listener: AnswerListener, session url: URL, suggestions: Any?) {
     let deadline = Date().addingTimeInterval(answerTimeout)
     while Date() < deadline {
-        if let reply = readJSON(PermissionReply.self, answerURL) {
-            try? FileManager.default.removeItem(at: answerURL)
-            closePrompt(prompt.id, in: url, message: reply.answer == .deny ? "Denied from the menu bar" : "Working…")
-            printDecision(reply.answer, suggestions: suggestions)
+        if let answer = listener.nextAnswer(waitingAtMost: answerPoll) {
+            closePrompt(prompt.id, in: url, message: answer == .deny ? "Denied from the menu bar" : "Working…")
+            printDecision(answer, suggestions: suggestions)
             return
         }
         guard readJSON(SessionRecord.self, url)?.prompt?.id == prompt.id else { return }
-        Thread.sleep(forTimeInterval: answerPoll)
     }
     closePrompt(prompt.id, in: url, message: nil)
 }
@@ -184,7 +196,7 @@ private func fingerprint(_ tool: String, _ input: [String: Any]) -> String {
 private func permissionDetail(_ tool: String, _ input: [String: Any]) -> String {
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     switch tool {
-    case "Bash": return clip(input["command"] as? String ?? "", 400)
+    case "Bash": return input["command"] as? String ?? ""
     case "Edit", "MultiEdit", "Write", "Read", "NotebookEdit":
         let path = input["file_path"] as? String ?? input["notebook_path"] as? String ?? ""
         return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path

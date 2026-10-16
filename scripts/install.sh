@@ -8,6 +8,8 @@ scripts/build.sh
 
 DEST="$HOME/.claude-pet"
 mkdir -p "$DEST/bin" "$DEST/sessions" "$HOME/.claude/commands"
+chmod 700 "$DEST"                 # sessions hold commands and messages
+rm -rf "$DEST/answers"            # answer files were replaced by sockets after 1.0.0
 
 # Stop the running app so the new binary takes over.
 pkill -f "$DEST/ClaudePet.app/Contents/MacOS/claude-pet" 2>/dev/null || true

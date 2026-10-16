@@ -67,7 +67,7 @@ final class MenuBarController: NSObject {
         model.onOpen = { [weak self] in self?.open($0) }
         model.onClearFinished = { [weak self] in self?.clearFinished() }
         model.onAnswer = { prompt, answer in
-            writeJSON(PermissionReply(answer: answer), Paths.answer(prompt.id))   // the waiting hook picks it up
+            DispatchQueue.global(qos: .userInitiated).async { sendAnswer(answer, to: prompt.id) }   // waits for the hook's ack
         }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -99,10 +99,10 @@ final class MenuBarController: NSObject {
             DirectoryWatcher(Paths.sessions) { [weak self] in self?.refresh() },
             DirectoryWatcher(Paths.root) { if !loadConfig().awake { NSApp.terminate(nil) } },
         ].compactMap { $0 }
-        // Housekeeping for things that age rather than change: stale sessions, unclaimed answers.
+        // Housekeeping for things that age rather than change: stale sessions, orphaned sockets.
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             self?.refresh()
-            self?.removeUnclaimedAnswers()
+            self?.removeOrphanedSockets()
         }
 
         refresh()
@@ -154,12 +154,16 @@ final class MenuBarController: NSObject {
         DispatchQueue.main.async { self.placePanel() }   // after SwiftUI has measured the change
     }
 
-    /// Answers whose hook already stopped waiting (answered in Claude, or timed out).
-    private func removeUnclaimedAnswers() {
+    /// Sockets left behind by hooks that were killed before they could clean up (Claude
+    /// kills its hooks when it quits): no session still shows their prompt.
+    private func removeOrphanedSockets() {
         let fm = FileManager.default, now = Date().timeIntervalSince1970
-        for url in (try? fm.contentsOfDirectory(at: Paths.answers, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+        let open = Set(loadSessions().compactMap { $0.prompt?.id })
+        for url in (try? fm.contentsOfDirectory(at: Paths.prompts, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
             let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            if let m = modified, now - m.timeIntervalSince1970 > promptLifetime { try? fm.removeItem(at: url) }
+            let age = modified.map { now - $0.timeIntervalSince1970 } ?? 0
+            // A hook creates its socket a moment before it publishes the prompt.
+            if age > 5 && !open.contains(url.deletingPathExtension().lastPathComponent) { try? fm.removeItem(at: url) }
         }
     }
 
